@@ -158,7 +158,14 @@ G4VParticleChange* G4OpBoundaryProcess::PostStepDoIt(const G4Track& aTrack,
   if(hStep != nullptr)
     pStep = hStep;
 
-  if(pStep->GetPostStepPoint()->GetStepStatus() == fGeomBoundary)
+  G4VPhysicalVolume* thePrePV  = pStep->GetPreStepPoint()->GetPhysicalVolume();
+  G4VPhysicalVolume* thePostPV = pStep->GetPostStepPoint()->GetPhysicalVolume();
+
+  G4bool isOnBoundary = (thePrePV != thePostPV);
+
+  if (!isOnBoundary) isOnBoundary = (pStep->GetPostStepPoint()->GetStepStatus() == fGeomBoundary);
+
+  if(isOnBoundary)
   {
     fMaterial1 = pStep->GetPreStepPoint()->GetMaterial();
     fMaterial2 = pStep->GetPostStepPoint()->GetMaterial();
@@ -171,8 +178,8 @@ G4VParticleChange* G4OpBoundaryProcess::PostStepDoIt(const G4Track& aTrack,
     return G4VDiscreteProcess::PostStepDoIt(aTrack, aStep);
   }
 
-  G4VPhysicalVolume* thePrePV  = pStep->GetPreStepPoint()->GetPhysicalVolume();
-  G4VPhysicalVolume* thePostPV = pStep->GetPostStepPoint()->GetPhysicalVolume();
+  //G4VPhysicalVolume* thePrePV  = pStep->GetPreStepPoint()->GetPhysicalVolume();
+  //G4VPhysicalVolume* thePostPV = pStep->GetPostStepPoint()->GetPhysicalVolume();
 
   if(verboseLevel > 1)
   {
@@ -434,24 +441,46 @@ G4VParticleChange* G4OpBoundaryProcess::PostStepDoIt(const G4Track& aTrack,
         return G4VDiscreteProcess::PostStepDoIt(aTrack, aStep);
       }
       MPT       = fMaterial2->GetMaterialPropertiesTable();
+      //G4MaterialPropertyVector* pp;
       rIndexMPV = nullptr;
       if(MPT != nullptr)
       {
         rIndexMPV = MPT->GetProperty(kRINDEX);
-      }
-      if(rIndexMPV != nullptr)
-      {
-        fRindex2 = rIndexMPV->Value(fPhotonMomentum, idx_rindex2);
-      }
-      else
-      {
-        fStatus = NoRINDEX;
-        if(verboseLevel > 1)
-          BoundaryProcessVerbose();
-        aParticleChange.ProposeLocalEnergyDeposit(fPhotonMomentum);
-        aParticleChange.ProposeTrackStatus(fStopAndKill);
-        return G4VDiscreteProcess::PostStepDoIt(aTrack, aStep);
-      }
+        if(rIndexMPV != nullptr)
+        {
+          fRindex2 = rIndexMPV->Value(fPhotonMomentum, idx_rindex2);
+        }
+        else
+        {
+          fStatus = NoRINDEX;
+          if(verboseLevel > 1)
+            BoundaryProcessVerbose();
+          aParticleChange.ProposeLocalEnergyDeposit(fPhotonMomentum);
+          aParticleChange.ProposeTrackStatus(fStopAndKill);
+          return G4VDiscreteProcess::PostStepDoIt(aTrack, aStep);
+        }
+        G4MaterialPropertyVector* pp;
+        if((pp = MPT->GetProperty(kREFLECTIVITY)))
+        {
+          fReflectivity = pp->Value(fPhotonMomentum, idx_reflect);
+        }
+        if((pp = MPT->GetProperty(kTRANSMITTANCE)))
+        {
+          fTransmittance = pp->Value(fPhotonMomentum, idx_trans);
+        }
+        if(fModel == unified)
+        {
+          fProb_sl = (pp = MPT->GetProperty(kSPECULARLOBECONSTANT))
+                      ? pp->Value(fPhotonMomentum, idx_lobe)
+                      : 0.;
+          fProb_ss = (pp = MPT->GetProperty(kSPECULARSPIKECONSTANT))
+                      ? pp->Value(fPhotonMomentum, idx_spike)
+                      : 0.;
+          fProb_bs = (pp = MPT->GetProperty(kBACKSCATTERCONSTANT))
+                      ? pp->Value(fPhotonMomentum, idx_back)
+                      : 0.;
+        }
+      } 
     }
     if(fFinish == polishedbackpainted || fFinish == groundbackpainted)
     {
@@ -668,6 +697,11 @@ G4ThreeVector G4OpBoundaryProcess::GetFacetNormal(
     gaussian distribution with mean 0 and standard deviation sigma_alpha.  */
 
     G4double sigma_alpha = 0.0;
+    /// get tabled SigmaAlpha, Yen-Yung Chang, 170205 ///
+		G4MaterialPropertyVector* SigmaAlphaTable = fMaterial2->GetMaterialPropertiesTable()->GetProperty("SIGMAALPHA");
+		if (SigmaAlphaTable) {
+			sigma_alpha = SigmaAlphaTable->Value(fPhotonMomentum);}
+	  ////////////////////////////////////////////////////
     if(fOpticalSurface)
       sigma_alpha = fOpticalSurface->GetSigmaAlpha();
     if(sigma_alpha == 0.0)
@@ -1078,7 +1112,7 @@ void G4OpBoundaryProcess::DielectricDielectric()
   G4bool inside = false;
   G4bool swap   = false;
 
-  if(fFinish == polished)
+  if(fFinish == polished && fModel != unified)//update by Yen-Yung Chang, 170205
   {
     fFacetNormal = fGlobalNormal;
   }
@@ -1121,7 +1155,7 @@ leap:
       G4SwapObj(&fRindex1, &fRindex2);
     }
 
-    if(fFinish == polished)
+    if(fFinish == polished && fModel != unified)//update by Yen-Yung Chang, 170205
     {
       fFacetNormal = fGlobalNormal;
     }
@@ -1210,10 +1244,10 @@ leap:
       // Transmittance has already been taken into account in PostStepDoIt.
       // For e.g. specular surfaces, the ratio of Fresnel refraction to
       // reflection should be given by the math, not material property
-      // TRANSMITTANCE
-      //if(fTransmittance > 0.)
-      //  transCoeff = fTransmittance;
-      //else if(cost1 != 0.0)
+      // TRANSMITTANCE - RS and YYC put it back in  - update documentation
+      if(fTransmittance > 0.)
+        transCoeff = fTransmittance;
+      else if(cost1 != 0.0)
       if(cost1 != 0.0)
         transCoeff = s2 / s1;
       else
@@ -1227,7 +1261,7 @@ leap:
 
         if(!surfaceRoughnessCriterionPass)
           fStatus = LambertianReflection;
-        if(fModel == unified && fFinish != polished)
+        if((fModel == unified && fFinish != polished) || fProb_sl!=0.0 || fProb_ss!=0.0 || fProb_bs!=0.0)
           ChooseReflection();
         if(fStatus == LambertianReflection)
         {
